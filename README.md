@@ -1,1 +1,1 @@
-# my-tshirt-store
+# JEWEL VOGUE
