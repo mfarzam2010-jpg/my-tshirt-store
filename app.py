@@ -18,7 +18,7 @@ except ImportError:
     RealDictCursor = None
 
 DEFAULT_SETTINGS = {
-    'store_name':'JEWEL VOGUE','currency':'PKR','cod_enabled':'1','bank_transfer_enabled':'1',
+    'store_name':'JEWEL VOGUE','tagline':'Elegant jewelry for every occasion.','currency':'PKR','cod_enabled':'1','bank_transfer_enabled':'1',
     'easypaisa_enabled':'1','jazzcash_enabled':'1','easypaisa_name':'','easypaisa_number':'',
     'easypaisa_note':'','jazzcash_name':'','jazzcash_number':'','jazzcash_note':'',
     'shipping_fee':'200','free_shipping_min':'5000'
@@ -92,6 +92,8 @@ CREATE TABLE IF NOT EXISTS reviews(id INTEGER PRIMARY KEY AUTOINCREMENT,product_
 CREATE TABLE IF NOT EXISTS coupons(id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT UNIQUE NOT NULL,discount_type TEXT DEFAULT 'percent',discount_value REAL DEFAULT 0,min_amount REAL DEFAULT 0,active INTEGER DEFAULT 1,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT);
 CREATE TABLE IF NOT EXISTS banks(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,account_title TEXT,account_number TEXT,iban TEXT,note TEXT,active INTEGER DEFAULT 1);''')
+        # Safely handle old SQLite databases whose settings table used a legacy schema.
+        # Keep the old table instead of deleting it, then create the modern key/value table.
         cols=[r[1] for r in cur.execute('PRAGMA table_info(settings)').fetchall()]
         if 'key' not in cols or 'value' not in cols:
             legacy='settings_legacy'
@@ -106,6 +108,7 @@ CREATE TABLE IF NOT EXISTS banks(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,
             if key_col and value_col:
                 cur.execute(f'INSERT OR IGNORE INTO settings(key,value) SELECT {key_col},{value_col} FROM {legacy} WHERE {key_col} IS NOT NULL')
 
+        # Add columns that may be missing from older versions of the store.
         required={
             'admin_users': [('created_at','TEXT')],
             'categories': [('active','INTEGER DEFAULT 1')],
@@ -172,6 +175,9 @@ def calculate_coupon(code,subtotal):
     return min(d,subtotal),c
 
 def render_store(body,title='JEWEL VOGUE',**context):
+    # Render the page body FIRST, then place the finished HTML inside the
+    # shared JEWEL VOGUE layout. This prevents nested Jinja templates from
+    # being treated as literal text and fixes the blank-content issue.
     context.update(
         year=datetime.now().year,
         cart_count=cart_count(),
@@ -182,8 +188,8 @@ def render_store(body,title='JEWEL VOGUE',**context):
     return render_template_string(page, title=title, **context)
 
 def render_admin(body,title='Admin',**context):
+    # Admin uses exactly the same storefront layout.
     return render_store(body,title,**context)
-
 def admin_required(fn):
     @wraps(fn)
     def wrapper(*a,**kw):
@@ -196,8 +202,8 @@ def product_card_template(): return '''{% for p in products %}<div class="produc
 @app.route('/')
 def home():
     products=query('SELECT p.*,c.name category_name,m.name material_name FROM products p LEFT JOIN categories c ON c.id=p.category_id LEFT JOIN materials m ON m.id=p.material_id WHERE p.active=1 ORDER BY p.id DESC LIMIT 8')
-    body='''<section class="hero"><h1>JEWEL VOGUE</h1><p>Elegant jewelry for every occasion.</p><a class="btn gold" href="{{url_for('products')}}">Shop Now</a></section><h2>Featured Jewelry</h2><div class="grid">'''+product_card_template()+'''</div>'''
-    return render_store(body,'JEWEL VOGUE',products=products,currency=get_setting('currency','PKR'))
+    body='''<section class="hero"><h1>JEWEL VOGUE</h1><p>{{tagline}}</p><a class="btn gold" href="{{url_for('products')}}">Shop Now</a></section><h2>Featured Jewelry</h2><div class="grid">'''+product_card_template()+'''</div>'''
+    return render_store(body,'JEWEL VOGUE',products=products,currency=get_setting('currency','PKR'),tagline=get_setting('tagline','Elegant jewelry for every occasion.'))
 
 @app.route('/products')
 def products():
@@ -252,10 +258,8 @@ def cart_update():
             if not p or q<=0:cart.pop(key,None)
             else:cart[key]=min(q,to_int(p['stock']))
     session['cart']=cart;flash('Cart updated.');return redirect(url_for('cart'))
-
 @app.get('/cart/remove/<int:product_id>')
 def cart_remove(product_id): cart=get_cart();cart.pop(str(product_id),None);session['cart']=cart;return redirect(url_for('cart'))
-
 @app.post('/coupon/apply')
 def coupon_apply():
     code=request.form.get('code','').strip();subtotal=sum(x['line_total'] for x in get_cart_items());d,c=calculate_coupon(code,subtotal)
@@ -270,7 +274,6 @@ def wishlist():
         ph=','.join('?' for _ in ids);products=query(f'SELECT p.*,c.name category_name,m.name material_name FROM products p LEFT JOIN categories c ON c.id=p.category_id LEFT JOIN materials m ON m.id=p.material_id WHERE p.id IN ({ph}) AND p.active=1',tuple(ids))
     body='<h1>Wishlist</h1><div class="grid">'+product_card_template()+'</div>' if products else '<div class="box"><h2>Wishlist is empty</h2><a class="btn" href="'+url_for('products')+'">Browse Products</a></div>'
     return render_store(body,'Wishlist',products=products,currency=get_setting('currency','PKR'))
-
 @app.get('/wishlist/toggle/<int:product_id>')
 def wishlist_toggle(product_id):
     w=get_wishlist();w.remove(product_id) if product_id in w else w.append(product_id);session['wishlist']=w;return redirect(request.referrer or url_for('wishlist'))
@@ -312,8 +315,7 @@ def admin_login():
         u=query('SELECT * FROM admin_users WHERE username=?',(request.form.get('username',''),),one=True)
         if u and check_password_hash(u['password_hash'],request.form.get('password','')):session['admin_id']=u['id'];return redirect(request.args.get('next') or url_for('admin_dashboard'))
         flash('Invalid username or password.')
-    body='''<div class="box" style="max-width:500px;margin:auto"><h1>Admin Login</h1><form method="post"><label>Username</label><input name="username" required><label>Password</label><input type="password" name="password" required><br><br><button class="btn gold">Login</button></form></div>''';return render_store(body,'Admin Login')
-
+    body='''<div class="box" style="max-width:500px;margin:auto"><h1>Admin Login</h1><form method="post"><label>Username</label><input name="username" required><label>Password</label><input type="password" name="password" required><br><br><button class="btn gold">Login</button></form><p class="small muted"></p></div>''';return render_store(body,'Admin Login')
 @app.get('/admin/logout')
 def admin_logout():session.pop('admin_id',None);return redirect(url_for('home'))
 
@@ -341,7 +343,6 @@ def simple_admin_form(title,fields,action_endpoint,item=None):
 @admin_required
 def admin_categories():
     rows=query('SELECT * FROM categories ORDER BY id DESC');return admin_crud_list('Categories','categories',rows,'admin_category_add','admin_category_edit','admin_category_toggle','admin_category_delete',{'id':'ID','name':'Name','active':'Active'})
-
 @app.route('/admin/categories/add',methods=['GET','POST'])
 @admin_required
 def admin_category_add():
@@ -349,18 +350,15 @@ def admin_category_add():
         try:insert_get_id('INSERT INTO categories(name,active) VALUES(?,1)',(request.form['name'],));flash('Category added.');return redirect(url_for('admin_categories'))
         except Exception as e:flash(str(e))
     return simple_admin_form('Add Category',[('name','Name','text')],'admin_category_add')
-
 @app.route('/admin/categories/edit/<int:item_id>',methods=['GET','POST'])
 @admin_required
 def admin_category_edit(item_id):
     item=query('SELECT * FROM categories WHERE id=?',(item_id,),one=True)
     if request.method=='POST':execute('UPDATE categories SET name=?,active=? WHERE id=?',(request.form['name'],to_int(request.form.get('active'),1),item_id));return redirect(url_for('admin_categories'))
     return simple_admin_form('Edit Category',[('name','Name','text'),('active','Active (1/0)','number')],'admin_category_edit',item)
-
 @app.get('/admin/categories/toggle/<int:item_id>')
 @admin_required
 def admin_category_toggle(item_id):execute('UPDATE categories SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(item_id,));return redirect(url_for('admin_categories'))
-
 @app.get('/admin/categories/delete/<int:item_id>')
 @admin_required
 def admin_category_delete(item_id):execute('DELETE FROM categories WHERE id=?',(item_id,));return redirect(url_for('admin_categories'))
@@ -369,7 +367,6 @@ def admin_category_delete(item_id):execute('DELETE FROM categories WHERE id=?',(
 @admin_required
 def admin_materials():
     rows=query('SELECT * FROM materials ORDER BY id DESC');return admin_crud_list('Materials','materials',rows,'admin_material_add','admin_material_edit','admin_material_toggle','admin_material_delete',{'id':'ID','name':'Name','active':'Active'})
-
 @app.route('/admin/materials/add',methods=['GET','POST'])
 @admin_required
 def admin_material_add():
@@ -377,18 +374,15 @@ def admin_material_add():
         try:insert_get_id('INSERT INTO materials(name,active) VALUES(?,1)',(request.form['name'],));flash('Material added.');return redirect(url_for('admin_materials'))
         except Exception as e:flash(str(e))
     return simple_admin_form('Add Material',[('name','Name','text')],'admin_material_add')
-
 @app.route('/admin/materials/edit/<int:item_id>',methods=['GET','POST'])
 @admin_required
 def admin_material_edit(item_id):
     item=query('SELECT * FROM materials WHERE id=?',(item_id,),one=True)
     if request.method=='POST':execute('UPDATE materials SET name=?,active=? WHERE id=?',(request.form['name'],to_int(request.form.get('active'),1),item_id));return redirect(url_for('admin_materials'))
     return simple_admin_form('Edit Material',[('name','Name','text'),('active','Active (1/0)','number')],'admin_material_edit',item)
-
 @app.get('/admin/materials/toggle/<int:item_id>')
 @admin_required
 def admin_material_toggle(item_id):execute('UPDATE materials SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(item_id,));return redirect(url_for('admin_materials'))
-
 @app.get('/admin/materials/delete/<int:item_id>')
 @admin_required
 def admin_material_delete(item_id):execute('DELETE FROM materials WHERE id=?',(item_id,));return redirect(url_for('admin_materials'))
@@ -398,28 +392,23 @@ def admin_material_delete(item_id):execute('DELETE FROM materials WHERE id=?',(i
 def admin_products():
     rows=query('SELECT p.*,c.name category_name,m.name material_name FROM products p LEFT JOIN categories c ON c.id=p.category_id LEFT JOIN materials m ON m.id=p.material_id ORDER BY p.id DESC')
     body='''<h1>Products</h1><p><a class="btn gold" href="{{url_for('admin_product_add')}}">Add Product</a> <a class="btn light" href="{{url_for('admin_dashboard')}}">Dashboard</a></p><div class="box table-wrap"><table><tr><th>ID</th><th>Product</th><th>Price</th><th>Category</th><th>Material</th><th>Stock</th><th>Active</th><th>Actions</th></tr>{% for r in rows %}<tr><td>{{r.id}}</td><td>{{r.name}}</td><td>{{r.price}}</td><td>{{r.category_name}}</td><td>{{r.material_name}}</td><td>{{r.stock}}</td><td>{{r.active}}</td><td class="actions"><a class="btn" href="{{url_for('admin_product_edit',item_id=r.id)}}">Edit</a><a class="btn light" href="{{url_for('admin_product_toggle',item_id=r.id)}}">Toggle</a><a class="btn danger" href="{{url_for('admin_product_delete',item_id=r.id)}}">Delete</a></td></tr>{% endfor %}</table></div>''';return render_admin(body,'Products',rows=rows)
-
 def product_form(item=None):
     cats=query('SELECT * FROM categories ORDER BY name');mats=query('SELECT * FROM materials ORDER BY name')
     body='''<div class="box"><h1>{{'Edit' if item else 'Add'}} Product</h1><form method="post"><div class="form-grid"><div><label>Name</label><input name="name" value="{{item.name if item else ''}}" required></div><div><label>Price</label><input type="number" step="0.01" name="price" value="{{item.price if item else ''}}" required></div><div><label>Stock</label><input type="number" name="stock" value="{{item.stock if item else 0}}"></div><div><label>Category</label><select name="category_id">{% for c in cats %}<option value="{{c.id}}" {% if item and item.category_id==c.id %}selected{% endif %}>{{c.name}}</option>{% endfor %}</select></div><div><label>Material</label><select name="material_id"><option value="">None</option>{% for m in mats %}<option value="{{m.id}}" {% if item and item.material_id==m.id %}selected{% endif %}>{{m.name}}</option>{% endfor %}</select></div><div><label>Active (1/0)</label><input type="number" name="active" value="{{item.active if item else 1}}"></div><div style="grid-column:1/-1"><label>Image URL</label><input name="image" value="{{item.image if item else ''}}"></div><div style="grid-column:1/-1"><label>Description</label><textarea name="description">{{item.description if item else ''}}</textarea></div></div><br><button class="btn gold">Save</button></form></div>''';return render_admin(body,'Product',item=item,cats=cats,mats=mats)
-
 @app.route('/admin/products/add',methods=['GET','POST'])
 @admin_required
 def admin_product_add():
     if request.method=='POST':insert_get_id('INSERT INTO products(name,description,price,image,category_id,material_id,stock,active) VALUES(?,?,?,?,?,?,?,?)',(request.form['name'],request.form.get('description',''),to_float(request.form['price']),request.form.get('image',''),to_int(request.form.get('category_id')),to_int(request.form.get('material_id')) or None,to_int(request.form.get('stock')),to_int(request.form.get('active'),1)));flash('Product added.');return redirect(url_for('admin_products'))
     return product_form()
-
 @app.route('/admin/products/edit/<int:item_id>',methods=['GET','POST'])
 @admin_required
 def admin_product_edit(item_id):
     item=query('SELECT * FROM products WHERE id=?',(item_id,),one=True)
     if request.method=='POST':execute('UPDATE products SET name=?,description=?,price=?,image=?,category_id=?,material_id=?,stock=?,active=? WHERE id=?',(request.form['name'],request.form.get('description',''),to_float(request.form['price']),request.form.get('image',''),to_int(request.form.get('category_id')),to_int(request.form.get('material_id')) or None,to_int(request.form.get('stock')),to_int(request.form.get('active'),1),item_id));flash('Product updated.');return redirect(url_for('admin_products'))
     return product_form(item)
-
 @app.get('/admin/products/toggle/<int:item_id>')
 @admin_required
 def admin_product_toggle(item_id):execute('UPDATE products SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(item_id,));return redirect(url_for('admin_products'))
-
 @app.get('/admin/products/delete/<int:item_id>')
 @admin_required
 def admin_product_delete(item_id):execute('DELETE FROM products WHERE id=?',(item_id,));return redirect(url_for('admin_products'))
@@ -428,7 +417,6 @@ def admin_product_delete(item_id):execute('DELETE FROM products WHERE id=?',(ite
 @admin_required
 def admin_orders():
     rows=query('SELECT o.*,b.name bank_name FROM orders o LEFT JOIN banks b ON o.bank_id=b.id ORDER BY o.id DESC');body='''<h1>Orders</h1><div class="box table-wrap"><table><tr><th>ID</th><th>Customer</th><th>Total</th><th>Payment</th><th>Status</th><th>Date</th><th>Action</th></tr>{% for o in rows %}<tr><td>{{o.id}}</td><td>{{o.customer_name}}<br>{{o.phone}}</td><td>{{currency}} {{'%.2f'|format(o.total)}}</td><td>{{o.payment_method}}{% if o.bank_name %}<br>{{o.bank_name}}{% endif %}</td><td>{{o.status}}</td><td>{{o.created_at}}</td><td><form method="post" action="{{url_for('admin_order_status',item_id=o.id)}}"><select name="status">{% for s in statuses %}<option {% if s==o.status %}selected{% endif %}>{{s}}</option>{% endfor %}</select><button class="btn">Save</button></form></td></tr>{% endfor %}</table></div>''';return render_admin(body,'Orders',rows=rows,currency=get_setting('currency','PKR'),statuses=['Pending','Processing','Shipped','Delivered','Cancelled'])
-
 @app.post('/admin/orders/status/<int:item_id>')
 @admin_required
 def admin_order_status(item_id):execute('UPDATE orders SET status=? WHERE id=?',(request.form.get('status'),item_id));return redirect(url_for('admin_orders'))
@@ -437,11 +425,9 @@ def admin_order_status(item_id):execute('UPDATE orders SET status=? WHERE id=?',
 @admin_required
 def admin_reviews():
     rows=query('SELECT r.*,p.name product_name FROM reviews r LEFT JOIN products p ON p.id=r.product_id ORDER BY r.id DESC');body='''<h1>Reviews</h1><div class="box table-wrap"><table><tr><th>Product</th><th>Name</th><th>Rating</th><th>Comment</th><th>Approved</th><th>Actions</th></tr>{% for r in rows %}<tr><td>{{r.product_name}}</td><td>{{r.name}}</td><td>{{r.rating}}</td><td>{{r.comment}}</td><td>{{r.approved}}</td><td><a class="btn" href="{{url_for('admin_review_toggle',item_id=r.id)}}">Toggle</a><a class="btn danger" href="{{url_for('admin_review_delete',item_id=r.id)}}">Delete</a></td></tr>{% endfor %}</table></div>''';return render_admin(body,'Reviews',rows=rows)
-
 @app.get('/admin/reviews/toggle/<int:item_id>')
 @admin_required
 def admin_review_toggle(item_id):execute('UPDATE reviews SET approved=CASE approved WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(item_id,));return redirect(url_for('admin_reviews'))
-
 @app.get('/admin/reviews/delete/<int:item_id>')
 @admin_required
 def admin_review_delete(item_id):execute('DELETE FROM reviews WHERE id=?',(item_id,));return redirect(url_for('admin_reviews'))
@@ -450,27 +436,22 @@ def admin_review_delete(item_id):execute('DELETE FROM reviews WHERE id=?',(item_
 @admin_required
 def admin_coupons():
     rows=query('SELECT * FROM coupons ORDER BY id DESC');body='''<h1>Coupons</h1><p><a class="btn gold" href="{{url_for('admin_coupon_add')}}">Add Coupon</a></p><div class="box table-wrap"><table><tr><th>Code</th><th>Type</th><th>Value</th><th>Minimum</th><th>Active</th><th>Actions</th></tr>{% for r in rows %}<tr><td>{{r.code}}</td><td>{{r.discount_type}}</td><td>{{r.discount_value}}</td><td>{{r.min_amount}}</td><td>{{r.active}}</td><td><a class="btn" href="{{url_for('admin_coupon_edit',item_id=r.id)}}">Edit</a><a class="btn light" href="{{url_for('admin_coupon_toggle',item_id=r.id)}}">Toggle</a><a class="btn danger" href="{{url_for('admin_coupon_delete',item_id=r.id)}}">Delete</a></td></tr>{% endfor %}</table></div>''';return render_admin(body,'Coupons',rows=rows)
-
 def coupon_form(item=None):
     body='''<div class="box"><h1>{{'Edit' if item else 'Add'}} Coupon</h1><form method="post"><label>Code</label><input name="code" value="{{item.code if item else ''}}" required><label>Type</label><select name="discount_type"><option {% if item and item.discount_type=='percent' %}selected{% endif %}>percent</option><option {% if item and item.discount_type=='fixed' %}selected{% endif %}>fixed</option></select><label>Value</label><input type="number" step="0.01" name="discount_value" value="{{item.discount_value if item else 0}}"><label>Minimum amount</label><input type="number" step="0.01" name="min_amount" value="{{item.min_amount if item else 0}}"><label>Active (1/0)</label><input type="number" name="active" value="{{item.active if item else 1}}"><br><button class="btn gold">Save</button></form></div>''';return render_admin(body,'Coupon',item=item)
-
 @app.route('/admin/coupons/add',methods=['GET','POST'])
 @admin_required
 def admin_coupon_add():
     if request.method=='POST':insert_get_id('INSERT INTO coupons(code,discount_type,discount_value,min_amount,active) VALUES(?,?,?,?,?)',(request.form['code'].strip().upper(),request.form.get('discount_type','percent'),to_float(request.form.get('discount_value')),to_float(request.form.get('min_amount')),to_int(request.form.get('active'),1)));return redirect(url_for('admin_coupons'))
     return coupon_form()
-
 @app.route('/admin/coupons/edit/<int:item_id>',methods=['GET','POST'])
 @admin_required
 def admin_coupon_edit(item_id):
     item=query('SELECT * FROM coupons WHERE id=?',(item_id,),one=True)
     if request.method=='POST':execute('UPDATE coupons SET code=?,discount_type=?,discount_value=?,min_amount=?,active=? WHERE id=?',(request.form['code'].strip().upper(),request.form.get('discount_type'),to_float(request.form.get('discount_value')),to_float(request.form.get('min_amount')),to_int(request.form.get('active'),1),item_id));return redirect(url_for('admin_coupons'))
     return coupon_form(item)
-
 @app.get('/admin/coupons/toggle/<int:item_id>')
 @admin_required
 def admin_coupon_toggle(item_id):execute('UPDATE coupons SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(item_id,));return redirect(url_for('admin_coupons'))
-
 @app.get('/admin/coupons/delete/<int:item_id>')
 @admin_required
 def admin_coupon_delete(item_id):execute('DELETE FROM coupons WHERE id=?',(item_id,));return redirect(url_for('admin_coupons'))
@@ -479,27 +460,22 @@ def admin_coupon_delete(item_id):execute('DELETE FROM coupons WHERE id=?',(item_
 @admin_required
 def admin_banks():
     rows=query('SELECT * FROM banks ORDER BY id DESC');body='''<h1>Banks</h1><p><a class="btn gold" href="{{url_for('admin_bank_add')}}">Add Bank</a></p><div class="box table-wrap"><table><tr><th>Name</th><th>Account Title</th><th>Account Number</th><th>IBAN</th><th>Active</th><th>Actions</th></tr>{% for r in rows %}<tr><td>{{r.name}}</td><td>{{r.account_title}}</td><td>{{r.account_number}}</td><td>{{r.iban}}</td><td>{{r.active}}</td><td><a class="btn" href="{{url_for('admin_bank_edit',item_id=r.id)}}">Edit</a><a class="btn light" href="{{url_for('admin_bank_toggle',item_id=r.id)}}">Toggle</a><a class="btn danger" href="{{url_for('admin_bank_delete',item_id=r.id)}}">Delete</a></td></tr>{% endfor %}</table></div>''';return render_admin(body,'Banks',rows=rows)
-
 def bank_form(item=None):
     body='''<div class="box"><h1>{{'Edit' if item else 'Add'}} Bank</h1><form method="post">{% for n,l in [('name','Bank Name'),('account_title','Account Title'),('account_number','Account Number'),('iban','IBAN')]}<label>{{l}}</label><input name="{{n}}" value="{{item[n] if item else ''}}">{% endfor %}<label>Note</label><textarea name="note">{{item.note if item else ''}}</textarea><label>Active (1/0)</label><input type="number" name="active" value="{{item.active if item else 1}}"><br><button class="btn gold">Save</button></form></div>''';return render_admin(body,'Bank',item=item)
-
 @app.route('/admin/banks/add',methods=['GET','POST'])
 @admin_required
 def admin_bank_add():
     if request.method=='POST':insert_get_id('INSERT INTO banks(name,account_title,account_number,iban,note,active) VALUES(?,?,?,?,?,?)',tuple(request.form.get(x,'') for x in ['name','account_title','account_number','iban','note'])+(to_int(request.form.get('active'),1),));return redirect(url_for('admin_banks'))
     return bank_form()
-
 @app.route('/admin/banks/edit/<int:item_id>',methods=['GET','POST'])
 @admin_required
 def admin_bank_edit(item_id):
     item=query('SELECT * FROM banks WHERE id=?',(item_id,),one=True)
     if request.method=='POST':execute('UPDATE banks SET name=?,account_title=?,account_number=?,iban=?,note=?,active=? WHERE id=?',(request.form.get('name'),request.form.get('account_title'),request.form.get('account_number'),request.form.get('iban'),request.form.get('note'),to_int(request.form.get('active'),1),item_id));return redirect(url_for('admin_banks'))
     return bank_form(item)
-
 @app.get('/admin/banks/toggle/<int:item_id>')
 @admin_required
 def admin_bank_toggle(item_id):execute('UPDATE banks SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?',(item_id,));return redirect(url_for('admin_banks'))
-
 @app.get('/admin/banks/delete/<int:item_id>')
 @admin_required
 def admin_bank_delete(item_id):execute('DELETE FROM banks WHERE id=?',(item_id,));return redirect(url_for('admin_banks'))
@@ -513,9 +489,8 @@ def admin_settings():
             if k.endswith('_enabled'):v='1' if request.form.get(k) else '0'
             if v is not None:set_setting(k,v)
         flash('Settings saved.');return redirect(url_for('admin_settings'))
-    body='''<div class="box"><h1>Store Settings</h1><form method="post"><div class="form-grid"><div><label>Store Name</label><input name="store_name" value="{{s.store_name}}"></div><div><label>Currency</label><input name="currency" value="{{s.currency}}"></div><div><label>Shipping Fee</label><input name="shipping_fee" value="{{s.shipping_fee}}"></div><div><label>Free Shipping Minimum</label><input name="free_shipping_min" value="{{s.free_shipping_min}}"></div>{% for k in ['cod_enabled','bank_transfer_enabled','easypaisa_enabled','jazzcash_enabled'] %}<div class="check"><input type="checkbox" name="{{k}}" {% if s[k]=='1' %}checked{% endif %}><label>{{k}}</label></div>{% endfor %}<div><label>EasyPaisa Name</label><input name="easypaisa_name" value="{{s.easypaisa_name}}"></div><div><label>EasyPaisa Number</label><input name="easypaisa_number" value="{{s.easypaisa_number}}"></div><div><label>JazzCash Name</label><input name="jazzcash_name" value="{{s.jazzcash_name}}"></div><div><label>JazzCash Number</label><input name="jazzcash_number" value="{{s.jazzcash_number}}"></div></div><br><button class="btn gold">Save Settings</button></form></div>'''
+    body='''<div class="box"><h1>Store Settings</h1><form method="post"><div class="form-grid"><div><label>Store Name</label><input name="store_name" value="{{s.store_name}}"></div><div><label>Tagline</label><input name="tagline" value="{{s.tagline}}"></div><div><label>Currency</label><input name="currency" value="{{s.currency}}"></div><div><label>Shipping Fee</label><input name="shipping_fee" value="{{s.shipping_fee}}"></div><div><label>Free Shipping Minimum</label><input name="free_shipping_min" value="{{s.free_shipping_min}}"></div>{% for k in ['cod_enabled','bank_transfer_enabled','easypaisa_enabled','jazzcash_enabled'] %}<div class="check"><input type="checkbox" name="{{k}}" {% if s[k]=='1' %}checked{% endif %}><label>{{k}}</label></div>{% endfor %}<div><label>EasyPaisa Name</label><input name="easypaisa_name" value="{{s.easypaisa_name}}"></div><div><label>EasyPaisa Number</label><input name="easypaisa_number" value="{{s.easypaisa_number}}"></div><div><label>JazzCash Name</label><input name="jazzcash_name" value="{{s.jazzcash_name}}"></div><div><label>JazzCash Number</label><input name="jazzcash_number" value="{{s.jazzcash_number}}"></div></div><br><button class="btn gold">Save Settings</button></form></div>'''
     s={k:get_setting(k,v) for k,v in DEFAULT_SETTINGS.items()};return render_admin(body,'Settings',s=s)
-
 @app.route('/admin/password',methods=['GET','POST'])
 @admin_required
 def admin_password():
@@ -525,7 +500,6 @@ def admin_password():
         elif request.form.get('new')!=request.form.get('confirm'):flash('New passwords do not match.')
         else:execute('UPDATE admin_users SET password_hash=? WHERE id=?',(generate_password_hash(request.form.get('new')),session['admin_id']));flash('Password changed.');return redirect(url_for('admin_dashboard'))
     body='''<div class="box" style="max-width:600px"><h1>Change Password</h1><form method="post"><label>Current Password</label><input type="password" name="current" required><label>New Password</label><input type="password" name="new" required><label>Confirm</label><input type="password" name="confirm" required><br><button class="btn gold">Change Password</button></form></div>''';return render_admin(body,'Password')
-
 @app.get('/admin/sales')
 @admin_required
 def admin_sales():
@@ -533,7 +507,6 @@ def admin_sales():
 
 @app.errorhandler(404)
 def not_found(e):return render_store('<div class="box"><h1>404</h1><p>Page not found.</p><a class="btn" href="'+url_for('home')+'">Home</a></div>','404'),404
-
 @app.errorhandler(500)
 def server_error(e):return render_store('<div class="box"><h1>Application Error</h1><p>Check the VS Code terminal for the exact error.</p><a class="btn" href="'+url_for('home')+'">Home</a></div>','Error'),500
 
