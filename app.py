@@ -26,6 +26,7 @@ DEFAULT_SETTINGS = {
     'store_name': 'JEWEL VOGUE',
     'tagline': 'Elegant jewelry for every occasion.',
     'contact_number': '',
+    'admin_email': '',
     'facebook_url': '',
     'instagram_url': '',
     'currency': 'PKR',
@@ -1110,6 +1111,13 @@ def calculate_coupon(code, subtotal):
 
 def send_email(to_email, subject, body):
 
+    """Send an email using SMTP settings from environment variables.
+
+    Email failures are deliberately caught so a mail-server problem never
+    cancels an otherwise successful customer order.
+    """
+
+    to_email = (to_email or '').strip()
     host = os.environ.get('SMTP_HOST', '').strip()
     port = to_int(os.environ.get('SMTP_PORT', '587'), 587)
     username = os.environ.get('SMTP_USERNAME', '').strip()
@@ -1120,7 +1128,6 @@ def send_email(to_email, subject, body):
         return False
 
     try:
-
         msg = EmailMessage()
         msg['Subject'] = subject
         msg['From'] = sender
@@ -1128,8 +1135,9 @@ def send_email(to_email, subject, body):
         msg.set_content(body)
 
         with smtplib.SMTP(host, port, timeout=15) as server:
-
+            server.ehlo()
             server.starttls()
+            server.ehlo()
 
             if username and password:
                 server.login(username, password)
@@ -1139,7 +1147,6 @@ def send_email(to_email, subject, body):
         return True
 
     except Exception as e:
-
         print('EMAIL ERROR:', e)
         return False
 
@@ -1156,33 +1163,82 @@ def notify_order_created(order_id):
         return
 
     currency = get_setting('currency', 'PKR')
+    items = query(
+        '''
+        SELECT product_name, price, quantity
+        FROM order_items
+        WHERE order_id=?
+        ORDER BY id
+        ''',
+        (order_id,)
+    )
 
-    body = f'''
-Thank you for ordering from JEWEL VOGUE.
+    item_lines = []
+    for item in items:
+        item_lines.append(
+            f"- {item['product_name']} x {item['quantity']} = {currency} {to_float(item['price']) * to_int(item['quantity']):.2f}"
+        )
+
+    items_text = '\n'.join(item_lines) or '- No item details available'
+
+    customer_body = f'''Thank you for ordering from JEWEL VOGUE.
 
 Order #: {o['id']}
 Customer: {o['customer_name']}
+Email: {o.get('email') or 'Not provided'}
+Phone: {o.get('phone') or 'Not provided'}
+Address: {o.get('address') or 'Not provided'}
+City: {o.get('city') or 'Not provided'}
+
+Items:
+{items_text}
+
+Subtotal: {currency} {to_float(o['subtotal']):.2f}
+Discount: {currency} {to_float(o['discount']):.2f}
+Shipping: {currency} {to_float(o['shipping']):.2f}
 Total: {currency} {to_float(o['total']):.2f}
 Payment: {o['payment_method']}
 Status: {o['status']}
 
-Track your order using the Track Order page on the JEWEL VOGUE website.
-'''
+Your order has been received successfully.
+Use the Track Order page on the JEWEL VOGUE website to see the latest tracking history.
+'''.strip()
+
+    admin_body = f'''NEW ORDER RECEIVED - JEWEL VOGUE
+
+Order #: {o['id']}
+Customer: {o['customer_name']}
+Customer Email: {o.get('email') or 'Not provided'}
+Phone: {o.get('phone') or 'Not provided'}
+Address: {o.get('address') or 'Not provided'}
+City: {o.get('city') or 'Not provided'}
+
+Items:
+{items_text}
+
+Subtotal: {currency} {to_float(o['subtotal']):.2f}
+Discount: {currency} {to_float(o['discount']):.2f}
+Shipping: {currency} {to_float(o['shipping']):.2f}
+Total: {currency} {to_float(o['total']):.2f}
+Payment: {o['payment_method']}
+Status: {o['status']}
+'''.strip()
 
     if o.get('email'):
         send_email(
             o['email'],
             'JEWEL VOGUE - Order Confirmation',
-            body
+            customer_body
         )
 
-    admin_email = os.environ.get('ADMIN_EMAIL', '').strip()
+    # Admin controls this address from Admin > Settings.
+    admin_email = get_setting('admin_email', '').strip()
 
     if admin_email:
         send_email(
             admin_email,
             f"JEWEL VOGUE - New Order #{o['id']}",
-            body
+            admin_body
         )
 
 
@@ -1199,15 +1255,16 @@ def notify_order_status(order_id, new_status):
 
     currency = get_setting('currency', 'PKR')
 
-    body = f'''
-Your JEWEL VOGUE order status has been updated.
+    body = f'''Your JEWEL VOGUE order status has been updated.
 
 Order #: {o['id']}
+Customer: {o['customer_name']}
 Status: {new_status}
 Total: {currency} {to_float(o['total']):.2f}
+Payment: {o['payment_method']}
 
 Use the Track Order page on the JEWEL VOGUE website to see the latest tracking history.
-'''
+'''.strip()
 
     send_email(
         o['email'],
@@ -2489,6 +2546,11 @@ def checkout():
             ''
         ).strip()
 
+        email = f.get(
+            'email',
+            ''
+        ).strip()
+
         phone = f.get(
             'phone',
             ''
@@ -2509,10 +2571,16 @@ def checkout():
             or None
         )
 
-        if not name or not phone or not address:
+        if not name or not email or not phone or not address:
 
             flash(
-                'Name, phone and address are required.'
+                'Name, email, phone and address are required.'
+            )
+
+        elif '@' not in email or '.' not in email.rsplit('@', 1)[-1]:
+
+            flash(
+                'Please enter a valid email address.'
             )
 
         elif method not in payments:
@@ -2560,7 +2628,7 @@ def checkout():
                         ),
                         (
                             name,
-                            f.get('email', ''),
+                            email,
                             phone,
                             address,
                             f.get('city', ''),
@@ -2599,7 +2667,7 @@ def checkout():
                         ''',
                         (
                             name,
-                            f.get('email', ''),
+                            email,
                             phone,
                             address,
                             f.get('city', ''),
@@ -2727,6 +2795,8 @@ def checkout():
                     <input
                         type="email"
                         name="email"
+                        required
+                        placeholder="you@example.com"
                     >
                 </div>
 
@@ -5122,6 +5192,27 @@ def admin_settings():
 
 
             <div class="settings-top">
+
+
+                <div class="settings-card">
+
+                    <h2>Email Notifications</h2>
+
+                    <label>Admin Order Notification Email</label>
+
+                    <input
+                        type="email"
+                        name="admin_email"
+                        value="{{ s.admin_email }}"
+                        placeholder="your@email.com"
+                    >
+
+                    <p class="small muted">
+                        New customer orders will be sent to this address.
+                        You can change it anytime from Admin Settings.
+                    </p>
+
+                </div>
 
 
                 <div class="settings-card">
